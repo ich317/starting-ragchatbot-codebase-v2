@@ -1,0 +1,5 @@
+[     486ms] [LOG] Loading course stats... @ http://127.0.0.1:8000/script.js?v=9:172
+[     501ms] [LOG] Course data received: {total_courses: 4, course_titles: Array(4)} @ http://127.0.0.1:8000/script.js?v=9:177
+[     508ms] [ERROR] Failed to load resource: the server responded with a status of 404 (Not Found) @ http://127.0.0.1:8000/favicon.ico:0
+[  268776ms] [LOG] Loading course stats... @ http://127.0.0.1:8000/script.js?v=9:172
+[  268786ms] [LOG] Course data received: {total_courses: 4, course_titles: Array(4)} @ http://127.0.0.1:8000/script.js?v=9:177
