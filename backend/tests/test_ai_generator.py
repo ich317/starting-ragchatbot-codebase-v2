@@ -23,6 +23,12 @@ from helpers import make_mock_message
 FAKE_KEY = "sk-ant-test-fake"
 VALID_MODEL = "claude-sonnet-4-6"
 
+DUMMY_TOOL = {
+    "name": "search_course_content",
+    "description": "Search course material",
+    "input_schema": {"type": "object", "properties": {}, "required": []},
+}
+
 
 def _make_generator(mock_client, model=VALID_MODEL):
     """Construct an AIGenerator whose Anthropic client is already mocked."""
@@ -252,3 +258,142 @@ class TestConversationHistory:
 
         kwargs = mock_client.messages.create.call_args.kwargs
         assert "Previous conversation:" not in kwargs["system"]
+
+
+class TestSequentialToolCalls:
+    """Sequential tool calling — up to 2 rounds before a forced final response."""
+
+    def test_two_round_success_makes_three_api_calls(self):
+        """Two tool rounds followed by a final call = 3 total API calls."""
+        mock_client = MagicMock()
+        round1 = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_r1", "name": "search_course_content", "input": {"query": "Python basics"}}],
+        )
+        round2 = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_r2", "name": "get_course_outline", "input": {"course_title": "Python"}}],
+        )
+        final = make_mock_message(text="Final answer after 2 rounds")
+        mock_client.messages.create.side_effect = [round1, round2, final]
+
+        mock_tool_manager = MagicMock()
+        mock_tool_manager.execute_tool.return_value = "some result"
+
+        gen = _make_generator(mock_client)
+        result = gen.generate_response(
+            "Tell me about Python", tools=[DUMMY_TOOL], tool_manager=mock_tool_manager
+        )
+
+        assert mock_client.messages.create.call_count == 3
+        assert mock_tool_manager.execute_tool.call_count == 2
+        assert result == "Final answer after 2 rounds"
+
+    def test_single_tool_round_then_direct_makes_two_api_calls(self):
+        """Regression guard: 1 tool round then direct response = 2 API calls."""
+        mock_client = MagicMock()
+        tool_use = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_001", "name": "search_course_content", "input": {"query": "q"}}],
+        )
+        final = make_mock_message(text="Done")
+        mock_client.messages.create.side_effect = [tool_use, final]
+
+        mock_tool_manager = MagicMock()
+        mock_tool_manager.execute_tool.return_value = "result"
+
+        gen = _make_generator(mock_client)
+        result = gen.generate_response("query", tools=[DUMMY_TOOL], tool_manager=mock_tool_manager)
+
+        assert mock_client.messages.create.call_count == 2
+        assert result == "Done"
+
+    def test_max_two_rounds_enforced(self):
+        """After 2 tool rounds, a final call is made without tools — 3 calls total.
+        StopIteration would be raised if a 4th call occurred."""
+        mock_client = MagicMock()
+        round1 = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_r1", "name": "search_course_content", "input": {"query": "a"}}],
+        )
+        round2 = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_r2", "name": "search_course_content", "input": {"query": "b"}}],
+        )
+        final = make_mock_message(text="Final")
+        mock_client.messages.create.side_effect = [round1, round2, final]
+
+        mock_tool_manager = MagicMock()
+        mock_tool_manager.execute_tool.return_value = "result"
+
+        gen = _make_generator(mock_client)
+        result = gen.generate_response("query", tools=[DUMMY_TOOL], tool_manager=mock_tool_manager)
+
+        assert mock_client.messages.create.call_count == 3
+        assert result == "Final"
+
+    def test_tool_error_terminates_loop_and_returns_string(self):
+        """A tool execution exception stops further rounds and still returns a string."""
+        mock_client = MagicMock()
+        round1 = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_err", "name": "search_course_content", "input": {"query": "q"}}],
+        )
+        final = make_mock_message(text="Sorry, I could not retrieve that information.")
+        mock_client.messages.create.side_effect = [round1, final]
+
+        mock_tool_manager = MagicMock()
+        mock_tool_manager.execute_tool.side_effect = Exception("DB connection failed")
+
+        gen = _make_generator(mock_client)
+        result = gen.generate_response("query", tools=[DUMMY_TOOL], tool_manager=mock_tool_manager)
+
+        assert mock_client.messages.create.call_count == 2
+        assert isinstance(result, str)
+
+    def test_tools_present_in_round_two_api_call(self):
+        """The second API call must still carry tools so Claude can make a second tool call."""
+        mock_client = MagicMock()
+        tool_use = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_001", "name": "search_course_content", "input": {"query": "q"}}],
+        )
+        final = make_mock_message(text="Done")
+        mock_client.messages.create.side_effect = [tool_use, final]
+
+        mock_tool_manager = MagicMock()
+        mock_tool_manager.execute_tool.return_value = "result"
+
+        gen = _make_generator(mock_client)
+        gen.generate_response("query", tools=[DUMMY_TOOL], tool_manager=mock_tool_manager)
+
+        second_call_kwargs = mock_client.messages.create.call_args_list[1].kwargs
+        assert "tools" in second_call_kwargs
+
+    def test_round1_tool_result_present_in_round2_messages(self):
+        """Round-2 API call must include the round-1 tool result in its message history."""
+        mock_client = MagicMock()
+        tool_use = make_mock_message(
+            stop_reason="tool_use",
+            tool_calls=[{"id": "tu_001", "name": "search_course_content", "input": {"query": "q"}}],
+        )
+        final = make_mock_message(text="Done")
+        mock_client.messages.create.side_effect = [tool_use, final]
+
+        mock_tool_manager = MagicMock()
+        mock_tool_manager.execute_tool.return_value = "ROUND_ONE_RESULT"
+
+        gen = _make_generator(mock_client)
+        gen.generate_response("query", tools=[DUMMY_TOOL], tool_manager=mock_tool_manager)
+
+        second_call_messages = mock_client.messages.create.call_args_list[1].kwargs["messages"]
+        all_blocks = [
+            b
+            for msg in second_call_messages
+            if isinstance(msg.get("content"), list)
+            for b in msg["content"]
+        ]
+        assert any(
+            isinstance(b, dict) and b.get("type") == "tool_result" and b.get("content") == "ROUND_ONE_RESULT"
+            for b in all_blocks
+        )
